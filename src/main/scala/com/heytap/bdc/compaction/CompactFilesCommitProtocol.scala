@@ -1,13 +1,18 @@
 package com.heytap.bdc.compaction
 
 import java.io.IOException
+import java.text.SimpleDateFormat
+import java.util.{Date, Locale}
 
+import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileStatus, FileSystem, Path, PathFilter}
+import org.apache.hadoop.mapred.JobID
 import org.apache.hadoop.mapreduce.lib.output.FileOutputCommitter
-import org.apache.hadoop.mapreduce.{JobContext, OutputCommitter, TaskAttemptContext}
+import org.apache.hadoop.mapreduce.{JobContext, OutputCommitter, TaskAttemptContext, TaskID, TaskType}
+import org.apache.spark.TaskContext
 import org.apache.spark.internal.io.FileCommitProtocol.TaskCommitMessage
-import org.apache.spark.internal.io.HadoopMapReduceCommitProtocol
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.execution.datasources.SQLHadoopMapReduceCommitProtocol
 
 import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
@@ -16,10 +21,10 @@ import scala.util.control.Breaks._
 class CompactFilesCommitProtocol(jobId: String,
                                  path: String,
                                  dynamicPartitionOverwrite: Boolean = false)
-  extends HadoopMapReduceCommitProtocol(jobId, path, dynamicPartitionOverwrite) {
+  extends SQLHadoopMapReduceCommitProtocol(jobId, path, dynamicPartitionOverwrite) {
 
   @transient private var fileOutputCommitter: FileOutputCommitter = _
-  
+
   override def commitJob(jobContext: JobContext, taskCommits: Seq[TaskCommitMessage]): Unit = {
     compactFiles(jobContext, taskCommits)
     super.commitJob(jobContext, taskCommits)
@@ -37,11 +42,11 @@ class CompactFilesCommitProtocol(jobId: String,
   }
 
   @throws[IOException]
-  private def getAllCommittedTaskPaths(context: JobContext): (FileSystem, Array[FileStatus]) = {
+  private def getAllCommittedTaskPaths(context: JobContext): (FileSystem, Path, Array[FileStatus]) = {
     val jobAttemptPath = fileOutputCommitter.getJobAttemptPath(context)
     val fileSystem = jobAttemptPath.getFileSystem(context.getConfiguration)
     val committedTaskPaths = fileSystem.listStatus(jobAttemptPath, new CommittedTaskFilter())
-    (fileSystem, committedTaskPaths)
+    (fileSystem, jobAttemptPath, committedTaskPaths)
   }
 
   private def getOutputFileFormat(fileSystem: FileSystem, committedTaskPaths: Array[FileStatus]): Option[Compactor.FileFormat.FileFormat] = {
@@ -68,12 +73,84 @@ class CompactFilesCommitProtocol(jobId: String,
     return None
   }
 
-  private def getAllGroupedCommittedLeafDirectoryPath(fileSystem: FileSystem,
-                                       committedTaskPaths: Array[FileStatus],
-                                       committedTaskPath: FileStatus = null,
-                                       parentResult: mutable.MultiMap[String, Path] = null): mutable.MultiMap[String, Path] = {
+  private def getAllGroupedCommittedLeafDirectoryPath(sparkSession: SparkSession,
+                                                      fileSystem: FileSystem,
+                                                      committedTaskPaths: Array[FileStatus],
+                                                      parallelism: Int)
+        : mutable.MultiMap[String, (String, Array[(String, Long)])] = {
+    //[String, mutable.Set[(String, Array[(String, Long)])]] => [hivePartitionKey, mutable.Set[(hivePartitionPathOfTask, Array[(filePath, fileLength)])]]
+    val result =
+      new mutable.HashMap[String, mutable.Set[(String, Array[(String, Long)])]] with mutable.MultiMap[String, (String, Array[(String, Long)])]
+
+    //parallelism in executor
+    val committedTaskDirRdd = sparkSession.sparkContext.parallelize(committedTaskPaths.map(_.getPath.toString), parallelism)
+    val serializableHadoopConf = new SerializableConfiguration(fileSystem.getConf)
+
+    val ret = new Array[mutable.HashMap[String, mutable.Set[(String, Array[(String, Long)])]]](committedTaskDirRdd.partitions.length)
+    sparkSession.sparkContext.runJob(committedTaskDirRdd,    
+      (taskContext: TaskContext, iter: Iterator[String]) => {
+        getAllGroupedCommittedLeafDirectoryPathOfTask(serializableHadoopConf.value, iter)
+      },
+      committedTaskDirRdd.partitions.indices,
+      (index, res: mutable.HashMap[String, mutable.Set[(String, Array[(String, Long)])]]) => {
+        ret(index) = res
+      })
+
+    ret.foreach(committedLeafDirectoryPathOfTask => {
+      if (committedLeafDirectoryPathOfTask != null) {
+        for (committedLeafDirectoryPathKey <- committedLeafDirectoryPathOfTask.keys) {
+          val committedLeafDirectoryPathGroup = committedLeafDirectoryPathOfTask.get(committedLeafDirectoryPathKey).get
+          for (committedLeafDirectoryPath <- committedLeafDirectoryPathGroup) {
+            result.addBinding(committedLeafDirectoryPathKey,
+              (committedLeafDirectoryPath._1, committedLeafDirectoryPath._2))
+          }
+        }
+      }
+    })
+
+    result
+  }
+
+  private def getAllGroupedCommittedLeafDirectoryPathOfTask(configuration: Configuration,
+                                                            iter: Iterator[String])
+      : mutable.HashMap[String, mutable.Set[(String, Array[(String, Long)])]] = {
+    //[String, mutable.Set[(String, Array[(String, Long)])]] => [hivePartitionKey, mutable.Set[(hivePartitionPathOfTask, Array[(filePath, fileLength)])]]
+    val result = new mutable.HashMap[String, mutable.Set[(String, Array[(String, Long)])]] with mutable.MultiMap[String, (String, Array[(String, Long)])]
+    iter.map((committedTaskDir: String) => {
+      val committedTaskPath = new Path(committedTaskDir)
+      val fileSystem = committedTaskPath.getFileSystem(configuration)
+      val committedTaskFileStatus = fileSystem.getFileStatus(committedTaskPath)
+      if (committedTaskFileStatus.isFile) {
+        throw new IllegalStateException(committedTaskDir + "should be a directory rather than a file")
+      } else if (committedTaskFileStatus.isDirectory) {
+        getAllGroupedCommittedLeafDirectoryPathOfTask(fileSystem, fileSystem.listStatus(committedTaskPath), committedTaskFileStatus)
+      } else {
+        //ignore symlink case
+        null
+      }
+    }).filter(_ != null).foreach((committedLeafDirectoryPathOfTask: mutable.MultiMap[String, (String, Array[(String, Long)])]) => {
+      for (committedLeafDirectoryPathKey <- committedLeafDirectoryPathOfTask.keys) {
+        val committedLeafDirectoryPathGroup = committedLeafDirectoryPathOfTask.get(committedLeafDirectoryPathKey).get
+        for (committedLeafDirectoryPath <- committedLeafDirectoryPathGroup) {
+          result.addBinding(committedLeafDirectoryPathKey,
+            (committedLeafDirectoryPath._1, committedLeafDirectoryPath._2))
+        }
+      }
+    })
+    result
+  }
+
+  private def getAllGroupedCommittedLeafDirectoryPathOfTask(fileSystem: FileSystem,
+                                                            committedTaskPaths: Array[FileStatus],
+                                                            committedTaskPath: FileStatus,
+                                                            parentResult: mutable.MultiMap[String, (String, Array[(String, Long)])] = null)
+        : mutable.MultiMap[String, (String, Array[(String, Long)])] = {
+    if (committedTaskPath == null) {
+      throw new IllegalStateException("committedTaskPath could not be null")
+    }
+
     val result = if (parentResult == null) {
-      new mutable.HashMap[String, mutable.Set[Path]] with mutable.MultiMap[String, Path]
+      new mutable.HashMap[String, mutable.Set[(String, Array[(String, Long)])]] with mutable.MultiMap[String, (String, Array[(String, Long)])]
     } else {
       parentResult
     }
@@ -81,98 +158,149 @@ class CompactFilesCommitProtocol(jobId: String,
     breakable {
       for (stat <- committedTaskPaths) {
         if (stat.isFile) {
-          if (committedTaskPath == null) {
-            throw new IllegalStateException(stat.getPath.toString + "should be a directory rather than a file")
+          val parentDirectory = stat.getPath.getParent
+          val leafPathKey = parentDirectory.toString.replaceFirst(committedTaskPath.getPath.toString, "")
+          val slashedLeafPathKey = if (leafPathKey.startsWith("/")) {
+            leafPathKey
           } else {
-            val parentDirectory = stat.getPath.getParent
-            val leafPathKey = parentDirectory.toString.replaceFirst(committedTaskPath.getPath.toString, "")
-            result.addBinding(leafPathKey, parentDirectory)
-            break()
+            "/" + leafPathKey
           }
+          //ensure all siblings are files
+          committedTaskPaths.foreach(stat => {
+            if (!stat.isFile) {
+              throw new IllegalStateException(stat.getPath + " should be a file")
+            }
+          })
+          result.addBinding(slashedLeafPathKey, (parentDirectory.toString, committedTaskPaths.map(stat => (stat.getPath.toString, stat.getLen))))
+          break()
         } else if (stat.isDirectory) {
-          if (committedTaskPath == null) {
-            getAllGroupedCommittedLeafDirectoryPath(fileSystem, fileSystem.listStatus(stat.getPath), stat, result)
-          } else {
-            getAllGroupedCommittedLeafDirectoryPath(fileSystem, fileSystem.listStatus(stat.getPath), committedTaskPath, result)
-          }
+          getAllGroupedCommittedLeafDirectoryPathOfTask(fileSystem, fileSystem.listStatus(stat.getPath), committedTaskPath, result)
         } //ignore symlink case
       }
     }
     result
   }
 
-  private def getAllCompactTaskSlips(fileSystem: FileSystem,
-                                    committedLeafDirectoryPathGroups: mutable.MultiMap[String, Path],
-                                    compactSize: Long, smallfileSize: Long): Array[(Array[String], String)] = {
+  private def getAllCompactTaskSlips(committedLeafDirectoryPathGroups: mutable.MultiMap[String, (String, Array[(String, Long)])], 
+                                     compactSize: Long, smallfileSize: Long): Seq[(Array[String], String)] = {
     if (smallfileSize >= compactSize) {
       throw new IllegalArgumentException("spark.compact.smallfile.size could not larger than spark.compact.size")
     }
     
     val result = new ListBuffer[(Array[String], String)]()
-    
-    for (committedLeafDirectoryPathGroup <- committedLeafDirectoryPathGroups.values) {
-      var slipFiles = new ListBuffer[Path]()
-      var slipTotalSize: Long = 0
-      //files in path of one same group should be compact together
-      for (committedLeafDirectoryPath <- committedLeafDirectoryPathGroup) {
-        for (committedLeafFilePath <- fileSystem.listStatus(committedLeafDirectoryPath)) {
-          if (!committedLeafFilePath.isFile) {
-            throw new IllegalStateException(committedLeafFilePath.toString + " should be a file")
-          }
-          if (committedLeafFilePath.getLen < smallfileSize) {
-            slipFiles += committedLeafFilePath.getPath
-            slipTotalSize = slipTotalSize + committedLeafFilePath.getLen
-            if (slipTotalSize >= compactSize) {
-              result += Tuple2(slipFiles.map(_.toString).toArray, getCompactFilePath(slipFiles))
 
-              slipFiles = new ListBuffer[Path]()
-              slipTotalSize = 0
-            }
+    for (committedLeafDirectoryPathKey <- committedLeafDirectoryPathGroups.keys) {
+      val committedLeafDirectoryPathGroup = committedLeafDirectoryPathGroups.get(committedLeafDirectoryPathKey).get
+      result ++= getCompactTaskSlips(committedLeafDirectoryPathKey,
+        committedLeafDirectoryPathGroup, compactSize, smallfileSize)
+    }
+
+    result
+  }
+
+  private def getCompactTaskSlips(committedLeafDirectoryPathKey: String,
+                                  committedLeafDirectoryPathGroup: mutable.Set[(String, Array[(String, Long)])],
+                                  compactSize: Long, smallfileSize: Long): Seq[(Array[String], String)] = {
+    val result = new ListBuffer[(Array[String], String)]()
+    
+    var slipFiles = new ListBuffer[String]()
+    var slipTotalSize: Long = 0
+    //files in path of one same group should be compact together
+    for (committedLeafDirectoryPath <- committedLeafDirectoryPathGroup) {
+      for (committedLeafFilePath <- committedLeafDirectoryPath._2) {
+        val filePath = committedLeafFilePath._1
+        val fileLength = committedLeafFilePath._2
+        if (fileLength < smallfileSize) {
+          slipFiles += filePath
+          slipTotalSize = slipTotalSize + fileLength
+          if (slipTotalSize >= compactSize) {
+            result += Tuple2(slipFiles.toArray,
+              getCompactFileRelativePath(committedLeafDirectoryPathKey, slipFiles))
+
+            slipFiles = new ListBuffer[String]()
+            slipTotalSize = 0
           }
         }
       }
-      if (slipTotalSize > 0 && slipFiles.length > 1) {
-        result += Tuple2(slipFiles.map(_.toString).toArray, getCompactFilePath(slipFiles))
-      }
+    }
+    if (slipTotalSize > 0 && slipFiles.length > 1) {
+      result += Tuple2(slipFiles.toArray,
+        getCompactFileRelativePath(committedLeafDirectoryPathKey, slipFiles))
     }
 
-    result.toArray
+    result
   }
 
-  private def getCompactFilePath(slipFiles: ListBuffer[Path]): String = {
-    val headPath = slipFiles.head
-    val parentPath = headPath.getParent
+  private def getCompactFileRelativePath(committedLeafDirectoryPathKey: String, slipFiles: ListBuffer[String]): String = {
+    val headPath = new Path(slipFiles.head)
+    //val parentPath = headPath.getParent
+    
     val compactFileName = headPath.getName.replaceFirst("part", "compact")
-    return new Path(parentPath, compactFileName).toString
+    return new Path(committedLeafDirectoryPathKey, compactFileName).toString
   }
 
   private def compactFiles(jobContext: JobContext, taskCommits: Seq[TaskCommitMessage]): Unit = {
-    val (fs, committedTaskPaths) = getAllCommittedTaskPaths(jobContext)
+    val (fs, jobAttemptPath, committedTaskPaths) = getAllCommittedTaskPaths(jobContext)
     val fileFormat = getOutputFileFormat(fs, committedTaskPaths)
     if (fileFormat.isEmpty) {
       throw new IllegalStateException("Unable to detect file format of files")
     } else {
       logInfo("Detect compact file format:" + fileFormat.get)
     }
-    val committedLeafDirectoryPathGroups: mutable.MultiMap[String, Path] = getAllGroupedCommittedLeafDirectoryPath(fs, committedTaskPaths)
+    val sparkSession: SparkSession = SparkSession.getActiveSession.getOrElse(SparkSession.getDefaultSession.get)
+    val compactPlanParallelism = sparkSession.conf.get("spark.compact.plan.parallelism", "5").toInt
+
+    val committedLeafDirectoryPathGroups = getAllGroupedCommittedLeafDirectoryPath(sparkSession, fs, committedTaskPaths, compactPlanParallelism)
+    val jobAttemptPathString = jobAttemptPath.toString
     for (committedLeafDirectoryPathGroup <- committedLeafDirectoryPathGroups.values) {
-      logInfo("Detect compact directory group: " + committedLeafDirectoryPathGroup.mkString("[", ", ", "]"))
+      logInfo("Detect compact directory group: " +
+        committedLeafDirectoryPathGroup.map(_._1.toString.replace(jobAttemptPathString, "")).mkString("[", ", ", "]"))
     }
     
-    val sparkSession: SparkSession = SparkSession.getActiveSession.getOrElse(SparkSession.getDefaultSession.get)
     val compactSize = sparkSession.conf.get("spark.compact.size", (1024 * 1024 * 1024).toString).toLong
     val smallfileSize = sparkSession.conf.get("spark.compact.smallfile.size", (16 * 1024 * 1024).toString).toLong
-
-    val compactTaskSlips = getAllCompactTaskSlips(fs, committedLeafDirectoryPathGroups, compactSize, smallfileSize)
+    val compactTaskSlips = getAllCompactTaskSlips(committedLeafDirectoryPathGroups, compactSize, smallfileSize)
     val compactTaskSlipRdd = sparkSession.sparkContext.parallelize(compactTaskSlips, compactTaskSlips.length)
 
     val serializableHadoopConf = new SerializableConfiguration(jobContext.getConfiguration)
-    sparkSession.sparkContext.runJob(compactTaskSlipRdd, (iter: Iterator[(Array[String], String)]) => {
-      iter.foreach((compactTask: (Array[String], String)) => {
-        Compactor.getCompactor(fileFormat.get).compact(serializableHadoopConf.value, compactTask._1, compactTask._2)
+    val compactWorkingRoot = jobAttemptPath.toString
+    val taskIds: Array[String] = sparkSession.sparkContext.runJob(compactTaskSlipRdd,
+      (taskContext: TaskContext, iter: Iterator[(Array[String], String)]) => {
+        val jobTrackerID = new SimpleDateFormat("yyyyMMddHHmmss", Locale.US).format(new Date)
+        val jobId = new JobID(jobTrackerID, taskContext.stageId())
+        val taskId = new TaskID(jobId, TaskType.MAP, taskContext.partitionId())
+        //val taskAttemptId = new TaskAttemptID(taskId, taskContext.attemptNumber())
+
+        iter.foreach((compactTask: (Array[String], String)) => {
+          val compactToTempFileName = compactTask._2 + "." + taskContext.attemptNumber() + ".inprogress"
+          val compactToTempFile = new Path(compactWorkingRoot, taskId.toString) + compactToTempFileName
+          val compactToFile = new Path(compactWorkingRoot, taskId.toString) + compactTask._2
+          Compactor.getCompactor(fileFormat.get).compact(serializableHadoopConf.value, compactTask._1, compactToTempFile, compactToFile)
+        })
+
+        taskId.toString
       })
+
+    logInfo("Clean temp files")
+    taskIds.foreach(taskId => {
+      val taskWorkingDirectory = new Path(compactWorkingRoot, taskId)
+      if (fs.exists(taskWorkingDirectory)) {
+        cleanTempFiles(fs, taskWorkingDirectory)
+      }
     })
-    logInfo("Compact " + compactTaskSlips.map(_._1.length).sum + " files to " + compactTaskSlips.length + " files")
+    
+    logInfo("Compacted " + compactTaskSlips.map(_._1.length).sum + " files to " + compactTaskSlips.length + " files")
+  }
+
+  private def cleanTempFiles(fs: FileSystem, path: Path): Unit = {
+    fs.listStatus(path).foreach(fileStatus => {
+      if (fileStatus.isDirectory) {
+        cleanTempFiles(fs, fileStatus.getPath)
+      } else if (fileStatus.isFile && fileStatus.getPath.getName.endsWith(".inprogress")) {
+        logInfo("Delete " + fileStatus.getPath)
+        fs.delete(fileStatus.getPath, false)
+      }
+    })
   }
 
   private class CommittedTaskFilter extends PathFilter {

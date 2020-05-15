@@ -1,5 +1,6 @@
 package com.heytap.bdc.compaction
 
+import java.io.FileNotFoundException
 import java.util
 
 import com.google.common.base.{Preconditions, Predicates}
@@ -7,6 +8,7 @@ import com.google.common.collect.Collections2
 import com.heytap.bdc.compaction.Compactor.FileFormat.FileFormat
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileSystem, Path}
+import org.apache.hadoop.ipc.RemoteException
 import org.apache.orc.OrcFile
 import org.apache.parquet.HadoopReadOptions
 import org.apache.parquet.format.converter.ParquetMetadataConverter
@@ -18,28 +20,88 @@ import org.apache.parquet.schema.MessageType
 import scala.collection.JavaConversions._
 
 trait Compactor extends Serializable with Logging {
-  def compact(conf: Configuration, compactFrom: Array[String], compactTo: String) = {
-    info("Compact files " + compactFrom.mkString("[", ",", "]") + " to " + compactTo)
-    val compactToPath = new Path(compactTo)
+  def compact(conf: Configuration, compactFromFiles: Array[String],
+              compactToTempFile: String, compactToFile: String): Unit = {
+    info("Compacting\nFrom: " + compactFromFiles.mkString("[", ",", "]") + "\nTo:" + compactToFile + "\nTemp: " + compactToTempFile)
+    val compactToPath = new Path(compactToFile)
     val fileSystem = compactToPath.getFileSystem(conf)
     if (fileSystem.exists(compactToPath)) {
-      warn(compactTo + " already exist, won't compact")
+      warn(compactToFile + " already exist, won't compact")
+      //won't throw exception so can continue delete source files
     } else {
-      val compactToTemp = compactTo + ".in-progress"
-      val compactToTempPath = new Path(compactToTemp)
+      val compactToTempPath = new Path(compactToTempFile)
       if(fileSystem.exists(compactToTempPath)) {
         warn(compactToTempPath + " exist, delete and re-compact ")
+        fileSystem.delete(compactToTempPath, false)
       }
-      compactInternal(conf, compactFrom, compactToTemp)
-      fileSystem.rename(compactToTempPath, compactToPath)
+
+      var compactSucceed = false
+      try {
+        compactInternal(conf, compactFromFiles, compactToTempFile)
+        compactSucceed = true
+      } catch {
+        case re: RemoteException => {
+          fileSystem.delete(compactToTempPath, false)
+          if (re.getClassName.equals("java.io.FileNotFoundException")
+            && !re.getMessage.contains(compactToTempFile) && fileSystem.exists(compactToPath)) {
+            warn("Compact failed, should be another attempt has succeed, delete temp file, message:" + re.toString)
+            //won't throw exception so can continue delete source files
+          } else {
+            throw re
+          }
+        }
+        case fnfe: FileNotFoundException => {
+          fileSystem.delete(compactToTempPath, false)
+          if (!fnfe.getMessage.contains(compactToTempFile) && fileSystem.exists(compactToPath)) {
+            warn("Compact failed, should be another attempt has succeed, delete temp file, message:" + fnfe.toString)
+            //won't throw exception so can continue delete source files
+          }
+        }
+        case e: Exception => {
+          fileSystem.delete(compactToTempPath, false)
+          throw e
+        }
+      }
+      
+      try {
+        if(compactSucceed) {
+          fileSystem.rename(compactToTempPath, compactToPath)
+        }
+      } catch {
+        case e: Exception => {
+          fileSystem.delete(compactToTempPath, false)
+          if (fileSystem.exists(compactToPath)) {
+            info(compactToFile + " already exist, should be another attempt has succeed, delete temp file")
+            //won't throw exception so can continue delete source files
+          } else {
+            throw e
+          }
+        }
+      }
     }
-    info("Delete compact source files " + compactFrom.mkString("[", ",", "]"))
-    for (file <- compactFrom) {
+
+    for (file <- compactFromFiles) {
       val path = new Path(file)
-      if(fileSystem.exists(path)) {
-        val deleteResult = fileSystem.delete(path, false)
-        if (!deleteResult) {
+      try {
+        info("Delete compact source file " + path)
+        val deleteSucceed = fileSystem.delete(path, false)
+        if (!deleteSucceed && fileSystem.exists(path)) {
           throw new IllegalStateException("Failed to delete file " + file)
+        }
+        //delete empty ancestor directory
+        var parentPath = path.getParent
+        var siblingStatuses = fileSystem.listStatus(parentPath)
+        while (siblingStatuses.length == 0) {
+          info("Delete empty source directory " + parentPath)
+          fileSystem.delete(parentPath, true)
+          parentPath = parentPath.getParent
+          siblingStatuses = fileSystem.listStatus(parentPath)
+        }
+      } catch {
+        case e: Exception => {
+          if (fileSystem.exists(path)) {
+            throw e
+          }
         }
       }
     }
