@@ -258,8 +258,12 @@ class CompactFilesCommitProtocol(jobId: String,
     }
     
     val compactSize = sparkSession.conf.get("spark.compact.size", (1024 * 1024 * 1024).toString).toLong
-    val smallfileSize = sparkSession.conf.get("spark.compact.smallfile.size", (16 * 1024 * 1024).toString).toLong
+    val smallfileSize = sparkSession.conf.get("spark.compact.smallfile.size", (32 * 1024 * 1024).toString).toLong
     val compactTaskSlips = getAllCompactTaskSlips(committedLeafDirectoryPathGroups, compactSize, smallfileSize)
+    if (compactTaskSlips.length == 0) {
+      logInfo("compactTaskSlips is empty, no compact tasks required")
+      return
+    }
     val compactTaskSlipRdd = sparkSession.sparkContext.parallelize(compactTaskSlips, compactTaskSlips.length)
 
     val serializableHadoopConf = new SerializableConfiguration(jobContext.getConfiguration)
