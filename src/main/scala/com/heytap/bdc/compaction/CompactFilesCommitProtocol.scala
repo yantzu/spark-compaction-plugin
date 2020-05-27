@@ -242,9 +242,7 @@ class CompactFilesCommitProtocol(jobId: String,
   private def compactFiles(jobContext: JobContext, taskCommits: Seq[TaskCommitMessage]): Unit = {
     val (fs, jobAttemptPath, committedTaskPaths) = getAllCommittedTaskPaths(jobContext)
     val fileFormat = getOutputFileFormat(fs, committedTaskPaths)
-    if (fileFormat.isEmpty) {
-      throw new IllegalStateException("Unable to detect file format of files")
-    } else {
+    if (fileFormat.isDefined) {
       logInfo("Detect compact file format:" + fileFormat.get)
     }
     val sparkSession: SparkSession = SparkSession.getActiveSession.getOrElse(SparkSession.getDefaultSession.get)
