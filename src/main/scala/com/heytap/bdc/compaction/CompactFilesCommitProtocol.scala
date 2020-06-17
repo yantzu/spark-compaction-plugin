@@ -23,6 +23,9 @@ class CompactFilesCommitProtocol(jobId: String,
                                  dynamicPartitionOverwrite: Boolean = false)
   extends SQLHadoopMapReduceCommitProtocol(jobId, path, dynamicPartitionOverwrite) {
 
+  private val DEFAULT_IN_PROGRESS_PREFIX = "_"
+  private val DEFAULT_IN_PROGRESS_SUFFIX = ".inprogress"
+  
   @transient private var fileOutputCommitter: FileOutputCommitter = _
 
   override def commitJob(jobContext: JobContext, taskCommits: Seq[TaskCommitMessage]): Unit = {
@@ -274,7 +277,9 @@ class CompactFilesCommitProtocol(jobId: String,
         //val taskAttemptId = new TaskAttemptID(taskId, taskContext.attemptNumber())
 
         iter.foreach((compactTask: (Array[String], String)) => {
-          val compactToTempFileName = compactTask._2 + "." + taskContext.attemptNumber() + ".inprogress"
+          val compactToTargetFilePath = new Path(compactTask._2)
+          val compactToTempFileName = new Path(compactToTargetFilePath.getParent, 
+            DEFAULT_IN_PROGRESS_PREFIX + compactToTargetFilePath.getName + "." + taskContext.attemptNumber() + DEFAULT_IN_PROGRESS_SUFFIX).toString
           val compactToTempFile = new Path(compactWorkingRoot, taskId.toString) + compactToTempFileName
           val compactToFile = new Path(compactWorkingRoot, taskId.toString) + compactTask._2
           Compactor.getCompactor(fileFormat.get).compact(serializableHadoopConf.value, compactTask._1, compactToTempFile, compactToFile)
@@ -298,9 +303,13 @@ class CompactFilesCommitProtocol(jobId: String,
     fs.listStatus(path).foreach(fileStatus => {
       if (fileStatus.isDirectory) {
         cleanTempFiles(fs, fileStatus.getPath)
-      } else if (fileStatus.isFile && fileStatus.getPath.getName.endsWith(".inprogress")) {
-        logInfo("Delete " + fileStatus.getPath)
-        fs.delete(fileStatus.getPath, false)
+      } else if (fileStatus.isFile) {
+        val fileName = fileStatus.getPath.getName
+        if (fileName.startsWith(DEFAULT_IN_PROGRESS_PREFIX)
+          && fileName.endsWith(DEFAULT_IN_PROGRESS_SUFFIX)) {
+          logInfo("Delete " + fileStatus.getPath)
+          fs.delete(fileStatus.getPath, false)
+        }
       }
     })
   }
