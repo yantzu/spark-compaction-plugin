@@ -117,8 +117,23 @@ class OrcCompactor extends Compactor {
     val successCompactFromPaths = OrcFile.mergeFiles(new Path(compactTo), writeOptions, compactFromPaths)
     if (successCompactFromPaths.size() != compactFrom.length) {
       val failedCompactFromPaths = Collections2.filter(compactFromPaths, Predicates.not(Predicates.in(successCompactFromPaths)))
-      throw new IllegalStateException("Merge ORC failed due to files cannot be merged:" + failedCompactFromPaths)
+      val allFilesEmpty = isAllFilesEmpty(conf, failedCompactFromPaths)
+      if (!allFilesEmpty) {
+        throw new IllegalStateException("Merge ORC failed due to files cannot be merged:" + failedCompactFromPaths)
+      }
     }
+  }
+
+  private def isAllFilesEmpty(conf: Configuration, failedCompactFromPaths: util.Collection[Path]): Boolean = {
+    val readOptions = OrcFile.readerOptions(conf)
+    for (failedCompactFromPath <- failedCompactFromPaths) {
+      val reader = OrcFile.createReader(failedCompactFromPath, readOptions)
+      val numberOfRows = reader.getStripes.map(_.getNumberOfRows).sum
+      if (numberOfRows != 0) {
+        return false
+      }
+    }
+    return true
   }
 }
 
