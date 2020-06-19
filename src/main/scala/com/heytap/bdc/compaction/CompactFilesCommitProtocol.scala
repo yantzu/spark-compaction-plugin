@@ -2,8 +2,11 @@ package com.heytap.bdc.compaction
 
 import java.io.IOException
 import java.text.SimpleDateFormat
+import java.util
 import java.util.{Date, Locale}
 
+import com.google.common.base.Predicates
+import com.google.common.collect.Collections2
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileStatus, FileSystem, Path, PathFilter}
 import org.apache.hadoop.mapred.JobID
@@ -269,7 +272,8 @@ class CompactFilesCommitProtocol(jobId: String,
 
     val serializableHadoopConf = new SerializableConfiguration(jobContext.getConfiguration)
     val compactWorkingRoot = jobAttemptPath.toString
-    val taskIds: Array[String] = sparkSession.sparkContext.runJob(compactTaskSlipRdd,
+    val beforeCompactTaskIds = util.Arrays.asList(fs.listStatus(jobAttemptPath).map(_.getPath.getName) : _*) //include _temporary actually
+    val successTaskIds: Array[String] = sparkSession.sparkContext.runJob(compactTaskSlipRdd,
       (taskContext: TaskContext, iter: Iterator[(Array[String], String)]) => {
         val jobTrackerID = new SimpleDateFormat("yyyyMMddHHmmss", Locale.US).format(new Date)
         val jobId = new JobID(jobTrackerID, taskContext.stageId())
@@ -288,8 +292,12 @@ class CompactFilesCommitProtocol(jobId: String,
         taskId.toString
       })
 
+    val afterCompactTaskIds = util.Arrays.asList(fs.listStatus(jobAttemptPath).map(_.getPath.getName): _*) //include _temporary actually
+    val compactTaskIds = Collections2.filter(afterCompactTaskIds, Predicates.not(Predicates.in(beforeCompactTaskIds)))
+
+    import scala.collection.JavaConverters._
     logInfo("Clean temp files")
-    taskIds.foreach(taskId => {
+    compactTaskIds.asScala.foreach(taskId => {
       val taskWorkingDirectory = new Path(compactWorkingRoot, taskId)
       if (fs.exists(taskWorkingDirectory)) {
         cleanTempFiles(fs, taskWorkingDirectory)
