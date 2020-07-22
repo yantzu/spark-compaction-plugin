@@ -8,6 +8,8 @@ import com.google.common.collect.Collections2
 import com.heytap.bdc.compaction.Compactor.FileFormat.FileFormat
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileSystem, Path}
+import org.apache.hadoop.hive.ql.io.{RCFile, RCFileOutputFormat}
+import org.apache.hadoop.io.compress.CompressionCodec
 import org.apache.hadoop.ipc.RemoteException
 import org.apache.orc.OrcFile
 import org.apache.parquet.HadoopReadOptions
@@ -110,6 +112,54 @@ trait Compactor extends Serializable with Logging {
   protected def compactInternal(conf: Configuration, compactFrom: Array[String], compactTo: String)
 }
 
+class RcCompactor extends Compactor {
+  override protected def compactInternal(conf: Configuration, compactFrom: Array[String], compactTo: String): Unit = {
+    var compactToCodec: CompressionCodec = null
+    var compactToColumnNumber = -1
+    var compactToWriter: RCFile.Writer = null
+    
+    val compactToPath = new Path(compactTo)
+    val fileSystem = compactToPath.getFileSystem(conf)
+
+    for (compactFromPart <- compactFrom) {
+      val compactFromPath = new Path(compactFromPart)
+      val compactFromReader = new RCFile.Reader(fileSystem, compactFromPath, conf)
+      while (compactFromReader.nextBlock()) {
+        //key part
+        val keyBuffer = compactFromReader.getCurrentKeyBufferObj
+        val recordLength = compactFromReader.getCurrentBlockLength
+        val keyLength = compactFromReader.getCurrentKeyLength
+        val compressedKeyLength = compactFromReader.getCurrentCompressedKeyLen
+        val codec = compactFromReader.getCompressionCodec
+
+        //value part
+        val valueBuffer = compactFromReader.getCurrentValueBufferObj
+
+        if (compactToWriter == null) {
+          compactToCodec = codec
+          compactToColumnNumber = keyBuffer.getColumnNumber()
+
+          RCFileOutputFormat.setColumnNumber(conf, keyBuffer.getColumnNumber)
+          compactToWriter = new RCFile.Writer(fileSystem, conf, compactToPath, null, codec)
+        }
+
+        val sameCodec = ((codec == compactToCodec)) || codec.getClass.equals(compactToCodec.getClass)
+        if ((keyBuffer.getColumnNumber != compactToColumnNumber) || (!sameCodec)) {
+          throw new IllegalStateException("RCFileMerge failed because the input files" 
+            + " use different CompressionCodec or have different column number" 
+            + " setting.")
+        }
+
+        compactToWriter.flushBlock(keyBuffer, valueBuffer, recordLength, keyLength, compressedKeyLength)
+      }
+    }
+
+    if (compactToWriter != null) {
+      compactToWriter.close()
+    }
+  }
+}
+
 class OrcCompactor extends Compactor {
   override protected def compactInternal(conf: Configuration, compactFrom: Array[String], compactTo: String): Unit = {
     val writeOptions = OrcFile.writerOptions(conf)
@@ -207,7 +257,9 @@ class ParquetCompactor extends Compactor {
 object Compactor extends Serializable {
 
   def getCompactor(fileFormat: FileFormat): Compactor = {
-    if (fileFormat == FileFormat.ORC) {
+    if (fileFormat == FileFormat.RC) {
+      return new RcCompactor()
+    } else if (fileFormat == FileFormat.ORC) {
       return new OrcCompactor()
     } else if (fileFormat == FileFormat.Parquet) {
       return new ParquetCompactor()
@@ -217,6 +269,7 @@ object Compactor extends Serializable {
 
   object FileFormat extends Enumeration {
     type FileFormat = Value
+    val RC = Value("RC")
     val ORC = Value("ORC")
     val Parquet = Value("Parquet")
   }

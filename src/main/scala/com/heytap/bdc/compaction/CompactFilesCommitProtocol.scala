@@ -63,7 +63,9 @@ class CompactFilesCommitProtocol(jobId: String,
           val buffer = new Array[Byte](CompactFilesCommitProtocol.MinFileSize)
           inputStream.readFully(buffer)
           val magic = new String(buffer)
-          if (magic.startsWith(CompactFilesCommitProtocol.OrcMagic)) {
+          if (magic.startsWith(CompactFilesCommitProtocol.RcMagic)) {
+            return Some(Compactor.FileFormat.RC)
+          } else if (magic.startsWith(CompactFilesCommitProtocol.OrcMagic)) {
             return Some(Compactor.FileFormat.ORC)
           } else if (magic.startsWith(CompactFilesCommitProtocol.ParquetMagic)) {
             return Some(Compactor.FileFormat.Parquet)
@@ -250,7 +252,11 @@ class CompactFilesCommitProtocol(jobId: String,
     val fileFormat = getOutputFileFormat(fs, committedTaskPaths)
     if (fileFormat.isDefined) {
       logInfo("Detect compact file format:" + fileFormat.get)
+    } else {
+      logWarning("Not able to detect file format, bypass small file compact")
+      return
     }
+    
     val sparkSession: SparkSession = SparkSession.getActiveSession.getOrElse(SparkSession.getDefaultSession.get)
     val compactPlanParallelism = sparkSession.conf.get("spark.compact.plan.parallelism", "5").toInt
 
@@ -330,6 +336,7 @@ class CompactFilesCommitProtocol(jobId: String,
 object CompactFilesCommitProtocol {
   private val MinFileSize: Int = 4
 
+  private val RcMagic: String = "RCF"
   private val OrcMagic: String = "ORC"
   private val ParquetMagic: String = "PAR1"
 }
