@@ -1,2 +1,2 @@
 # spark-compaction-plugin
-实现自动合并Spark SQL的输出的小文件，通过spark.sql.sources.commitProtocolClass=com.heytap.bdc.compaction.CompactFilesCommitProtocol配置生效
+Make Spark to compact small files like Hive, support Parquet/ORC/RC file, set spark.sql.sources.commitProtocolClass=com.heytap.bdc.compaction.CompactFilesCommitProtocol to enable.
