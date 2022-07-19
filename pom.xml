@@ -20,7 +20,7 @@
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
-    <groupId>com.heytap.bdc</groupId>
+    <groupId>com.github.yantzu</groupId>
     <artifactId>spark-compaction</artifactId>
     <version>1.0.4</version>
     <packaging>jar</packaging>
@@ -45,134 +45,6 @@
         <hive.version>1.2.1.spark2</hive.version>
         <java.version>1.8</java.version>
     </properties>
-
-    <repositories>
-        <repository>
-            <id>oppo.cloudera.repo</id>
-            <url>http://nexus.os.adc.com/nexus/content/repositories/cloudera/</url>
-            <name>OPPO Cloudera Repositories</name>
-            <snapshots>
-                <enabled>false</enabled>
-            </snapshots>
-        </repository>
-        <repository>
-            <id>oppo.cloudera_maven.repo</id>
-            <url>http://nexus.os.adc.com/nexus/content/repositories/cloudera_maven/</url>
-            <name>OPPO Cloudera Maven Repositories</name>
-            <snapshots>
-                <enabled>false</enabled>
-            </snapshots>
-        </repository>
-        <repository>
-            <id>oppo.central.repo</id>
-            <url>http://nexus.os.adc.com/nexus/content/repositories/central/</url>
-            <name>OPPO central Repositories</name>
-            <snapshots>
-                <enabled>false</enabled>
-            </snapshots>
-        </repository>
-        <repository>
-            <id>oppo.apache_maven.repo</id>
-            <url>http://nexus.os.adc.com/nexus/content/repositories/apache_maven/</url>
-            <name>OPPO central Repositories</name>
-            <snapshots>
-                <enabled>false</enabled>
-            </snapshots>
-        </repository>
-        <repository>
-            <id>oppo.release.repo</id>
-            <url>http://nexus.os.adc.com/nexus/content/repositories/releases/</url>
-            <name>OPPO central Repositories</name>
-            <snapshots>
-                <enabled>false</enabled>
-            </snapshots>
-        </repository>
-        <repository>
-            <id>oppo.public.repo</id>
-            <url>http://nexus.os.adc.com/nexus/content/repositories/oppo_public_repo/</url>
-            <name>OPPO central Repositories</name>
-            <snapshots>
-                <enabled>false</enabled>
-            </snapshots>
-        </repository>
-        <repository>
-            <id>oppo.thirdparty.repo</id>
-            <url>http://nexus.os.adc.com/nexus/content/repositories/thirdparty/</url>
-            <name>OPPO central Repositories</name>
-            <snapshots>
-                <enabled>false</enabled>
-            </snapshots>
-        </repository>
-        <repository>
-            <id>oppo.spring_io_libs_release.repo</id>
-            <url>http://nexus.os.adc.com/nexus/content/repositories/spring.io.libs_release/</url>
-            <name>OPPO central Repositories</name>
-            <snapshots>
-                <enabled>false</enabled>
-            </snapshots>
-        </repository>
-        <repository>
-            <id>oppo.jboss.repo</id>
-            <url>http://nexus.os.adc.com/nexus/content/repositories/jboss/</url>
-            <name>OPPO JBOSS Repositories</name>
-            <snapshots>
-                <enabled>false</enabled>
-            </snapshots>
-        </repository>
-        <repository>
-            <id>oppo.jboss_public.repo</id>
-            <url>http://nexus.os.adc.com/nexus/content/repositories/jboss-public-repository-group/
-            </url>
-            <name>OPPO JBOSS Repositories</name>
-            <snapshots>
-                <enabled>false</enabled>
-            </snapshots>
-        </repository>
-    </repositories>
-
-    <pluginRepositories>
-        <pluginRepository>
-            <id>oppo.cloudera.repo</id>
-            <url>http://nexus.os.adc.com/nexus/content/repositories/cloudera/</url>
-            <name>OPPO Cloudera Repositories</name>
-            <snapshots>
-                <enabled>false</enabled>
-            </snapshots>
-        </pluginRepository>
-        <pluginRepository>
-            <id>oppo.cloudera_maven.repo</id>
-            <url>http://nexus.os.adc.com/nexus/content/repositories/cloudera_maven/</url>
-            <name>OPPO Cloudera Maven Repositories</name>
-            <snapshots>
-                <enabled>false</enabled>
-            </snapshots>
-        </pluginRepository>
-        <pluginRepository>
-            <id>oppo.central.repo</id>
-            <url>http://nexus.os.adc.com/nexus/content/repositories/central/</url>
-            <name>OPPO central Repositories</name>
-            <snapshots>
-                <enabled>false</enabled>
-            </snapshots>
-        </pluginRepository>
-        <pluginRepository>
-            <id>oppo.release.repo</id>
-            <url>http://nexus.os.adc.com/nexus/content/repositories/releases/</url>
-            <name>OPPO central Repositories</name>
-            <snapshots>
-                <enabled>false</enabled>
-            </snapshots>
-        </pluginRepository>
-        <pluginRepository>
-            <id>oppo.public.repo</id>
-            <url>http://nexus.os.adc.com/nexus/content/repositories/oppo_public_repo/</url>
-            <name>OPPO central Repositories</name>
-            <snapshots>
-                <enabled>false</enabled>
-            </snapshots>
-        </pluginRepository>
-    </pluginRepositories>
-
 
     <dependencies>
         <dependency>
